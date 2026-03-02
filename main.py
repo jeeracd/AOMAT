@@ -1,114 +1,134 @@
+import numpy as np
+import pandas as pd
 import matplotlib
 matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
-import tkinter as tk
-from tkinter import ttk, messagebox
-import numpy as np
+import pyvista as pv
 
 from pyoma2.functions.gen import example_data
 from pyoma2.setup.single import SingleSetup
 from pyoma2.algorithms.fdd import FDD
 from pyoma2.algorithms.ssi import SSIdat
-from pyoma2.functions.plot import plot_mac_matrix
+from pyoma2.support.geometry import Geometry2
 
 # ─────────────────────────────────────────────
-# GLOBAL STATE
+# 1. RUN OMA
 # ─────────────────────────────────────────────
-setup = None
-ssidat = None
-fdd = None
+data, ground_truth = example_data()
+setup = SingleSetup(data, fs=600)
+setup.decimate_data(q=30)
 
-# ─────────────────────────────────────────────
-# FUNCTIONS
-# ─────────────────────────────────────────────
-def run_analysis():
-    global setup, ssidat, fdd
+fdd    = FDD(name="FDD", nxseg=1024, method_SD="per")
+ssidat = SSIdat(name="SSIdat", br=30, ordmax=30)
+setup.add_algorithms(fdd, ssidat)
+setup.run_all()
+setup.mpe("SSIdat", sel_freq=[0.891, 2.598, 4.096, 5.27, 6.020], order_in=25) # sel_freq must be automated to auto-detect CMIF peaks
+ssidat_res = ssidat.result 
 
-    data, ground_truth = example_data()
+print("=== SSIdat RESULTS ===")
+print(f"Natural frequencies : {ssidat_res.Fn}")
+print(f"Damping ratios      : {ssidat_res.Xi}")
+print(f"Mode shapes         :\n{ssidat_res.Phi.real}\n")
 
-    # Display ground truth in text box
-    output_box.config(state="normal")
-    output_box.delete("1.0", tk.END)
-    output_box.insert(tk.END, "=== GROUND TRUTH ===\n")
-    output_box.insert(tk.END, f"Natural Frequencies : {ground_truth[0]}\n")
-    output_box.insert(tk.END, f"Damping Ratio       : {ground_truth[2]}\n\n")
-    output_box.insert(tk.END, "Running FDD and SSIdat...\n")
-    output_box.config(state="disabled")
-    root.update()
 
-    # Setup
-    setup = SingleSetup(data, fs=600)
-    setup.decimate_data(q=30)
+# Structure Physical Details
 
-    fdd    = FDD(name="FDD", nxseg=1024, method_SD="per")
-    ssidat = SSIdat(name="SSIdat", br=30, ordmax=30)
-    setup.add_algorithms(fdd, ssidat)
-    setup.run_all()
+sens_names = ["ch1", "ch2", "ch3", "ch4", "ch5"] # ESP32s
 
-    # Extract modal parameters
-    setup.mpe("SSIdat", sel_freq=[0.89, 2.598, 4.095, 5.261, 6.0], order_in=20)
-    ssidat_res = dict(ssidat.result)
+pts_coord = pd.DataFrame(
+    {"x": [0.0]*5, "y": [0.0]*5, "z": [1.0, 2.0, 3.0, 4.0, 5.0]},
+    index=sens_names
+)
 
-    # Show results in text box
-    output_box.config(state="normal")
-    output_box.insert(tk.END, "=== SSIdat RESULTS ===\n")
-    output_box.insert(tk.END, f"Natural Frequencies : {ssidat_res['Fn']}\n")
-    output_box.insert(tk.END, f"Damping Ratios      : {ssidat_res['Xi']}\n")
-    output_box.insert(tk.END, f"Mode Shapes         :\n{ssidat_res['Phi'].real}\n")
-    output_box.config(state="disabled")
+sens_map = pd.DataFrame(
+    {"ch1": [1.,0.,0.], "ch2": [1.,0.,0.], "ch3": [1.,0.,0.],
+     "ch4": [1.,0.,0.], "ch5": [1.,0.,0.]},
+    index=["x","y","z"]
+).T
 
-    # Enable plot buttons
-    btn_cmif.config(state="normal")
-    btn_stab.config(state="normal")
-    btn_mac.config(state="normal")
+sens_sign = pd.DataFrame(
+    {"ch1": [1.,0.,0.], "ch2": [1.,0.,0.], "ch3": [1.,0.,0.],
+     "ch4": [1.,0.,0.], "ch5": [1.,0.,0.]},
+    index=["x","y","z"]
+).T
 
-    messagebox.showinfo("Done", "Analysis complete! Use the buttons to view plots.")
+geo = Geometry2(
+    sens_names=sens_names,
+    pts_coord=pts_coord,
+    sens_map=sens_map,
+    sens_lines=np.array([[0,1],[1,2],[2,3],[3,4]]),
+    sens_sign=sens_sign,
+)
 
-def show_cmif():
-    fdd.plot_CMIF(freqlim=(0, 8))
-    plt.show()
 
-def show_stab():
-    ssidat.plot_stab(freqlim=(0, 10), hide_poles=False)
-    plt.show()
+points = geo.pts_coord.to_numpy()
+lines  = np.array([np.hstack([2, line]) for line in geo.sens_lines])
 
-def show_mac():
-    ssidat_res = dict(ssidat.result)
-    plot_mac_matrix(ssidat_res['Phi'].real)
-    plt.show()
+# Heritage Building at rest 
+pl1 = pv.Plotter(title="HB at Rest")
+pl1.add_points(points, color="gray", point_size=10,
+               render_points_as_spheres=True)
+line_mesh = pv.PolyData(points, lines=lines)
+pl1.add_mesh(line_mesh, color="gray")
 
-# ─────────────────────────────────────────────
-# GUI LAYOUT
-# ─────────────────────────────────────────────
-root = tk.Tk()
-root.title("AOMAT — Operational Modal Analysis Tool")
-root.geometry("700x500")
-root.resizable(True, True)
+# Add ESP32 names
+for i, name in enumerate(sens_names):
+    pl1.add_point_labels(
+        points[i:i+1], [name],
+        font_size=16, always_visible=True, shape_color="white"
+    )
 
-# Title
-tk.Label(root, text="Automated OMA Tool", font=("Helvetica", 16, "bold")).pack(pady=10)
+pl1.add_axes(line_width=5, labels_off=False)
+pl1.show()  # close window to continue
 
-# Run button
-tk.Button(root, text="▶  Run Analysis", command=run_analysis,
-          bg="#2196F3", fg="white", font=("Helvetica", 12), padx=10).pack(pady=5)
+# Mode Shape Visual
+mode_nr   = 1
+scale     = 2.0
+phi = ssidat_res.Phi.real[:, mode_nr - 1]  # ← dot notation
+fn  = ssidat_res.Fn[mode_nr - 1]           # ← dot notation
 
-# Plot buttons (disabled until analysis runs)
-btn_frame = tk.Frame(root)
-btn_frame.pack(pady=5)
+# Displacement from HB at rest (grey) and HB at excitation (mode n)
+deformed  = points.copy()
+deformed[:, 0] += phi * scale  # X displacement
 
-btn_cmif = tk.Button(btn_frame, text="CMIF Plot",         command=show_cmif,  state="disabled", width=16)
-btn_stab = tk.Button(btn_frame, text="Stabilization Diagram", command=show_stab, state="disabled", width=22)
-btn_mac  = tk.Button(btn_frame, text="MAC Matrix",        command=show_mac,   state="disabled", width=16)
+pl2 = pv.Plotter(title=f"Mode {mode_nr} — {fn:.3f} Hz (static)")
+# HB at rest (gray)
+pl2.add_mesh(pv.PolyData(points, lines=lines), color="gray", opacity=0.3)
+pl2.add_points(points, color="gray", point_size=8,
+               render_points_as_spheres=True, opacity=0.3)
+# HB at excitation (red)
+deformed_mesh = pv.PolyData(deformed, lines=lines)
+pl2.add_mesh(deformed_mesh, color="red")
+pl2.add_points(deformed, color="red", point_size=10,
+               render_points_as_spheres=True)
+pl2.add_axes(line_width=5, labels_off=False)
+pl2.show()  # close window to continue
 
-btn_cmif.pack(side="left", padx=5)
-btn_stab.pack(side="left", padx=5)
-btn_mac.pack(side="left", padx=5)
+# Animation of Mode Shape
+n_frames = 60
+pl3 = pv.Plotter(title=f"Mode {mode_nr} — {fn:.3f} Hz (animated)")
+pl3.open_gif(f"mode_{mode_nr}.gif")  # saves animation as GIF
 
-# Output text box
-tk.Label(root, text="Output Log:", anchor="w").pack(fill="x", padx=15)
-output_box = tk.Text(root, height=18, state="disabled", bg="#1e1e1e",
-                     fg="#d4d4d4", font=("Courier", 9))
-output_box.pack(fill="both", expand=True, padx=15, pady=5)
+for frame in range(n_frames):
+    t        = frame / n_frames
+    amp      = np.sin(2 * np.pi * t)           
+    animated = points.copy()
+    animated[:, 0] += phi * scale * amp       
 
-# Start GUI loop
-root.mainloop()
+    pl3.clear()
+    anim_mesh = pv.PolyData(animated, lines=lines)
+    pl3.add_mesh(anim_mesh, color="red")
+    pl3.add_points(animated, color="red", point_size=10,
+                   render_points_as_spheres=True)
+    pl3.add_mesh(pv.PolyData(points, lines=lines), color="gray", opacity=0.3)
+    pl3.add_axes(line_width=5, labels_off=False)
+    pl3.write_frame()
+
+pl3.close()
+print(f"Animation saved as: mode_{mode_nr}.gif")
+
+# FDD and SSI numerical Values
+
+fdd.plot_CMIF(freqlim=(0, 8))
+ssidat.plot_stab(freqlim=(0, 10), hide_poles=False)
+plt.show()
